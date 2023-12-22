@@ -336,3 +336,19 @@ cor(testing$HDI, pr.multiple)^2
 ```
 
 Correlation with all vars is = 0.40 which is better than using only 1 variable
+
+```{r}
+library(olsrr)
+
+model = HDI ~ js_hom + age + dut_ill + js_abr + js_div + imp_rlg + js_euth + ps_arm + el_fair + el_brb + ps_lead + job_men + trs_ntn + dmc_coup + c_chr + el_thr + dmc_obey + dut_chl + hom_prn + dmc_cnt + dmc_rlg + trs_knw + c_gvr + c_plc + c_prt
+
+
+linFit <- lm(model, data=training)
+
+ols_step_all_possible(linFit) # All possible subset regressions: the number is exponential with p 
+
+ols_step_best_subset(linFit) # The best subset regression for each p: still exponential with p 
+
+
+#we re trying every subset of features to get the best model! 
+```
