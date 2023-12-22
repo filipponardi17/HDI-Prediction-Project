@@ -197,25 +197,51 @@ print(na_count)
 
 # Feature selection
 
+Due to system limitation, it is not possible for me to use the whole dataset to compute a random forest as it will take 120gb of memory and I also guess quite a long time to comute. I will have to use a sample approx 100 per country to compute feature importance.
+
+```{r}
+#sample 100 unique records per country
+
+library(dplyr)
+
+# Assuming your dataset is named imputed_data
+
+# Create a function to sample 150 unique records for each country
+sample_n_unique <- function(data, n) {
+  data %>%
+    group_by(cntry_name) %>%
+    slice_sample(n = 150, replace = FALSE)
+}
+
+# Create a subset with 150 unique records for each country
+subset_data <- imputed_data %>%
+  group_by(cntry_name) %>%
+  sample_n_unique(150)
+
+# Verify the dimensions of the subset
+dim(subset_data)
+
+# To check the distribution of records per country:
+table(subset_data$cntry_name)
+
+
+
+```
+
+```{r}
+table(imputed_data$cnt)
+```
+
 ```{r}
 
 
-#basically all of this code it's just to exclude pop_vote from scaling
-# numeric_vars_to_scale <- sapply(imputed_data, is.numeric)
-# 
-# numeric_vars_to_scale["HDI"] <- FALSE
-# 
-# scaled_df <- imputed_data
-# 
-# scaled_df[, numeric_vars_to_scale] <- scale(scaled_df[, numeric_vars_to_scale])
+
+# I will be using Random Forest feature importance to obtain the first 25 (out of the 117 I have) variables to predict HDI:
+
+subset_data <- subset_data[, !names(subset_data) %in% "cntry_name"] # take off country name
 
 
-# I will be using Random Forest feature importance to obtain the first 30 (out of the 117 I have) variables to predict HDI:
-
-imputed_data <- imputed_data[, !names(imputed_data) %in% "cntry_name"]
-
-
-scaled_df <- scale(imputed_data)
+scaled_df <- scale(subset_data)
 
 set.seed(123)
 
@@ -224,21 +250,24 @@ rf = randomForest(HDI ~ ., data=scaled_df, na.action = na.roughfix,
                                ntree=500, mtry=4, importance=TRUE)
 
 t = importance(rf)
-t1 = sort(t[,3], decreasing = T)
-t2 = t1[1:20] #20 predictor in decreasing order
+t1 = sort(t[,1], decreasing = T)
+t2 = t1[1:25] #20 predictor in decreasing order
 importance_vars = names(t2) #IN T2 THERE ARE NAMED VECTORS, TO ACCESS NAMES WE DO THIS
 print(importance_vars) #CHECK CORRECT NAMES
 
 # List of variables to keep 
-variables_to_keep <- c("pol_sp", "el_fair", "el_brb", "c_eu1", "el_rch", "cls_eu", "imp_imm", "age", "edu_lvl", "trs_knw", "gvr_vds", "cls_cnt", "pol_rad", "cls_vlg", "cls_rgn", "c_prs", "ps_sat", "c_cvl", "cls_wrl", "prd")
+variables_to_keep <- c("js_hom", "age", "dut_ill", "js_abr", "js_div", "imp_rlg", "js_euth", "ps_arm", "el_fair", "el_brb", "ps_lead",
+                   "job_men", "trs_ntn", "dmc_coup", "c_chr", "el_thr", "dmc_obey", "dut_chl", "hom_prn", "dmc_cnt", "dmc_rlg", "trs_knw",
+                   "c_gvr", "c_plc", "c_prt", "HDI")
+
 
 # Create a new data frame with only the selected variables
-pigs1 <- pigs[, variables_to_keep]
+scaled_df <- scaled_df[, variables_to_keep]
 
 
 
 
-
+scaled_df <- as.data.frame(scaled_df)
 ```
 
 # Splitting
@@ -246,9 +275,9 @@ pigs1 <- pigs[, variables_to_keep]
 cambia nomi dataset!!!
 
 ```{r}
-in_train <- createDataPartition(log(W7R$HDI), p = 0.75, list = FALSE)  # 75% for training
-training <- W7R[ in_train,]
-testing <- W7R[-in_train,]
+in_train <- createDataPartition(scaled_df$HDI, p = 0.75, list = FALSE)  # 75% for training
+training <- scaled_df[ in_train,]
+testing <- scaled_df[-in_train,]
 nrow(training)
 nrow(testing)
 
@@ -260,11 +289,7 @@ training %>% ggplot(aes(x=HDI)) + geom_density(fill="navyblue") #+ scale_x_log10
 
 ```{r}
 
-training %>% ggplot(aes(x=log(c_eu1), y=log(HDI))) + geom_point(color = "navyblue")
-```
-
-```{r}
-names(training)
+training %>% ggplot(aes(x=js_hom, y=HDI)) + geom_point(color = "navyblue")
 ```
 
 ```{r}
@@ -279,6 +304,35 @@ ggcorr(training, label = TRUE)
 
 ```{r}
 
-linFit <- lm(log(HDI) ~ sqft, data=training)
-linFit
+linFit <- lm(HDI ~ js_hom, data=training)
+summary(linFit)
 ```
+
+```{r}
+par(mfrow=c(2,2))
+plot(linFit, pch=23 ,bg='orange',cex=2) 
+```
+
+```{r}
+pr.simple = exp(predict(linFit, newdata=testing))
+cor(testing$HDI, pr.simple)^2
+```
+
+The squared correlation is= 0.24 which is not high
+
+```{r}
+# Assuming 'training' is your dataset
+linFit <- lm(HDI ~ js_hom + age + dut_ill + js_abr + js_div + imp_rlg + js_euth + ps_arm + el_fair + el_brb + ps_lead + job_men + trs_ntn + dmc_coup + c_chr + el_thr + dmc_obey + dut_chl + hom_prn + dmc_cnt + dmc_rlg + trs_knw + c_gvr + c_plc + c_prt, data = training)
+
+summary(linFit)
+
+```
+
+R squared with all vars is = 0.54
+
+```{r}
+pr.multiple = exp(predict(linFit, newdata=testing))
+cor(testing$HDI, pr.multiple)^2
+```
+
+Correlation with all vars is = 0.40 which is better than using only 1 variable
