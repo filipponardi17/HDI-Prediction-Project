@@ -166,6 +166,10 @@ for (i in 1:nrow(correlation_matrix)) {
 ```
 
 ```{r}
+names(W7R)
+```
+
+```{r}
 
 #md.pattern(W7R)
 
@@ -176,19 +180,19 @@ imputed_W7R <- mice(W7R, m = 5, maxit = 5, method = "pmm", seed = 123)
 
 complete_W7R <- complete(imputed_W7R)
 
-#save(complete_pigs, file= "complete_pigs.rda")
-#load("complete_pigs.rda")
+save(complete_W7R, file= "complete_W7R.rda")
+#load("complete_W7R.rda")
 
 
 #remove dupes 
 
-imputed_data <- complete_W7R[!duplicated(complete_W7R), ]
+#imputed_data <- complete_W7R[!duplicated(complete_W7R), ]
 
 
 #let's make sure we have no NAs
 
-na_count <- colSums(is.na(imputed_data))
-print(na_count)
+#na_count <- colSums(is.na(imputed_data))
+#print(na_count)
 ```
 
 # Feature selection
