@@ -176,23 +176,23 @@ names(W7R)
 
 
 #LET'S IMPUTE THE NAs
-imputed_W7R <- mice(W7R, m = 5, maxit = 5, method = "pmm", seed = 123)
-
-complete_W7R <- complete(imputed_W7R)
-
-save(complete_W7R, file= "complete_W7R.rda")
-#load("complete_W7R.rda")
+# imputed_W7R <- mice(W7R, m = 5, maxit = 5, method = "pmm", seed = 123)
+# 
+# complete_W7R <- complete(imputed_W7R)
+# 
+# save(complete_W7R, file= "complete_W7R.rda")
+load("complete_W7R.rda")
 
 
 #remove dupes 
 
-#imputed_data <- complete_W7R[!duplicated(complete_W7R), ]
+imputed_data <- complete_W7R[!duplicated(complete_W7R), ]
 
 
 #let's make sure we have no NAs
 
-#na_count <- colSums(is.na(imputed_data))
-#print(na_count)
+na_count <- colSums(is.na(imputed_data))
+print(na_count)
 ```
 
 # Feature selection
@@ -201,24 +201,40 @@ save(complete_W7R, file= "complete_W7R.rda")
 
 
 #basically all of this code it's just to exclude pop_vote from scaling
-numeric_vars_to_scale <- sapply(pigs, is.numeric)
+# numeric_vars_to_scale <- sapply(imputed_data, is.numeric)
+# 
+# numeric_vars_to_scale["HDI"] <- FALSE
+# 
+# scaled_df <- imputed_data
+# 
+# scaled_df[, numeric_vars_to_scale] <- scale(scaled_df[, numeric_vars_to_scale])
 
-numeric_vars_to_scale["pop_vote"] <- FALSE
 
-scaled_df <- pigs
+# I will be using Random Forest feature importance to obtain the first 30 (out of the 117 I have) variables to predict HDI:
 
-scaled_df[, numeric_vars_to_scale] <- scale(scaled_df[, numeric_vars_to_scale])
+imputed_data <- imputed_data[, !names(imputed_data) %in% "cntry_name"]
 
 
-# I will be using Random Forest feature importance to obtain the first 20 variables to predict pop_vote scaled and not scaled:
-
-#NOT SCALED 
+scaled_df <- scale(imputed_data)
 
 set.seed(123)
 
-pop_rf = randomForest(pop_vote ~ ., data=pigs, na.action = na.roughfix,
+rf = randomForest(HDI ~ ., data=scaled_df, na.action = na.roughfix,
                                proximity = T,
                                ntree=500, mtry=4, importance=TRUE)
+
+t = importance(rf)
+t1 = sort(t[,3], decreasing = T)
+t2 = t1[1:20] #20 predictor in decreasing order
+importance_vars = names(t2) #IN T2 THERE ARE NAMED VECTORS, TO ACCESS NAMES WE DO THIS
+print(importance_vars) #CHECK CORRECT NAMES
+
+# List of variables to keep 
+variables_to_keep <- c("pol_sp", "el_fair", "el_brb", "c_eu1", "el_rch", "cls_eu", "imp_imm", "age", "edu_lvl", "trs_knw", "gvr_vds", "cls_cnt", "pol_rad", "cls_vlg", "cls_rgn", "c_prs", "ps_sat", "c_cvl", "cls_wrl", "prd")
+
+# Create a new data frame with only the selected variables
+pigs1 <- pigs[, variables_to_keep]
+
 
 
 
