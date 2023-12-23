@@ -1,0 +1,366 @@
+---
+title: "HW2_Filippo_Nardi"
+author: "Filippo Nardi"
+date: "2023-12-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This work is highly correlated to my first homework in this course. I will once again use the World Value survey to asses the differents social and life values based on the HDI index provided by the United Nations.
+
+First let's import all the librarries needed for this project
+
+```{r}
+library(randomForest)
+library(shapper)
+library(GGally)
+library(ggplot2)
+library(mice)
+library(VIM)
+library(caret)
+library(tidyr) 
+library(factoextra)
+library(cluster)
+library(mclust)
+library(kernlab)
+library(mice)
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+Here I will load the data, W7R (Wave 7 Reduced) is an already filtered version of the EVS_WVS_joint2, I will use this is as it's focused on readibilty (columns renamed) and social attitudes.
+
+Data2 in non other than the dataset containing the Human Development Index (HDI) produced by the United Nations Development Programme, it has other columnso other than HDI but for this analysis it's the thing I value the most.
+
+```{r}
+data = load("W7R.rds")
+data2 =  read.csv("human-development-index-hdi-2014.csv", header = TRUE, stringsAsFactors = FALSE, fileEncoding = "UTF-8")
+
+#names(W7R)
+
+
+```
+
+Since both datasets have differents standard for the names of the countries this list is for unifying that.
+
+```{r}
+
+rename_mapping <- c(
+  "Bolivia (Plurinational State of)" = "Bolivia",
+  "Bosnia and Herzegovina" = "Bosnia",
+  "Czech Republic" = "Czechia",
+  "Hong Kong, China (SAR)" = "HongKong-SAR",
+  "Iran (Islamic Republic of)" = "Iran",
+  "Korea (Republic of)" = "South-Korea",
+  "New Zealand" = "New-Zealand",
+  "Russian Federation" = "Russia",
+  "Viet Nam" = "Vietnam",
+  "The former Yugoslav Republic of Macedonia" = "North-Macedonia",
+  "United Kingdom" = "Great-Britain",
+  "United States" = "United-States"
+)
+
+data2$Location <- ifelse(data2$Location %in% names(rename_mapping), rename_mapping[data2$Location], data2$Location)
+
+
+```
+
+This is part is for creating the column in HDI in W7R and then appending the correct HDI value from the United Nations dataset
+
+```{r}
+W7R$HDI <- NA
+
+for (i in 1:nrow(W7R)) {
+  country <- W7R$cntry_name[i]
+  
+  match_rows <- which(data2$Location == country)
+  
+  if (length(match_rows) > 0) {
+    W7R$HDI[i] <- data2$Human.Development.Index..HDI.[match_rows[1]]
+  }
+}
+
+
+# Check the updated W7R with the new 'HDI' column
+print(unique(W7R$HDI))
+```
+
+Here we will simply check and drop out from the analysis those countries that from W7R don't have their HDI listed.
+
+Those countries are the results of unique_countries_with_NA_HDI and are "Taiwan", "Ethiopia", "Macau" and "PuertoRico".
+
+```{r}
+rows_with_NA <- which(is.na(W7R$HDI))
+
+# Extract corresponding country names for rows with NA HDI
+countries_with_NA_HDI <- W7R$cntry_name[rows_with_NA]
+
+# Show unique country names with NA HDI
+unique_countries_with_NA_HDI <- unique(countries_with_NA_HDI)
+unique_countries_with_NA_HDI
+
+# Filter out rows in W7R that correspond to unique_countries_with_NA_HDI
+W7R <- W7R[!(W7R$cntry_name %in% unique_countries_with_NA_HDI), ]
+
+# Reset row names after filtering
+rownames(W7R) <- NULL
+
+```
+
+Let's have a preliminary summary of the Dataset.
+
+So since the 3 biggest indicators for HDI is education, expected life and GNI per capita i have to drop some variables that would just be too highly correlated with HDI, those are income level and education level. I will also drop the column "E181_EVS5" that is what party the person has voted for as a binary classification in populist and non populist like the last homework would work but finding obscure parties in third world countries is a hassle that I don't want to take
+
+We can clearly see we have a lot NAs
+
+```{r}
+names(W7R)
+dim(W7R)
+str(W7R)
+summary(W7R)
+
+W7R <- W7R[, !(names(W7R) %in% c("incm_lvl", "edu_lvl", "E181_EVS5"))]
+
+na_count <- colSums(is.na(W7R))
+print(na_count)
+na_count2 <- sum(is.na(W7R$HDI))
+print(na_count2)
+
+```
+
+```{r}
+# Calculate correlations
+correlation_matrix <- cor(W7R)
+
+# Create a function to filter significant correlations
+significant_correlations <- function(correlation_matrix, threshold = 0.05) {
+  sig_corr <- cor.test(correlation_matrix, method = "pearson")
+  sig_corr$p.value < threshold
+}
+
+# Apply the function to the correlation matrix
+significant_corr <- apply(correlation_matrix, 1, significant_correlations)
+
+# Print significant correlations
+for (i in 1:nrow(correlation_matrix)) {
+  for (j in 1:ncol(correlation_matrix)) {
+    if (significant_corr[i, j] && i != j) {
+      cat(names(correlation_matrix)[i], "and", names(correlation_matrix)[j], ":", correlation_matrix[i, j], "\n")
+    }
+  }
+}
+```
+
+```{r}
+names(W7R)
+```
+
+```{r}
+
+#md.pattern(W7R)
+
+
+
+#LET'S IMPUTE THE NAs
+# imputed_W7R <- mice(W7R, m = 5, maxit = 5, method = "pmm", seed = 123)
+# 
+# complete_W7R <- complete(imputed_W7R)
+# 
+# save(complete_W7R, file= "complete_W7R.rda")
+load("complete_W7R.rda")
+
+
+#remove dupes 
+
+imputed_data <- complete_W7R[!duplicated(complete_W7R), ]
+
+
+#let's make sure we have no NAs
+
+na_count <- colSums(is.na(imputed_data))
+print(na_count)
+```
+
+# Feature selection
+
+Due to system limitation, it is not possible for me to use the whole dataset to compute a random forest as it will take 120gb of memory and I also guess quite a long time to comute. I will have to use a sample approx 100 per country to compute feature importance.
+
+```{r}
+#sample 100 unique records per country
+
+library(dplyr)
+
+# Assuming your dataset is named imputed_data
+
+# Create a function to sample 150 unique records for each country
+sample_n_unique <- function(data, n) {
+  data %>%
+    group_by(cntry_name) %>%
+    slice_sample(n = 20, replace = FALSE)
+}
+
+# Create a subset with 150 unique records for each country
+subset_data <- imputed_data %>%
+  group_by(cntry_name) %>%
+  sample_n_unique(20)
+
+# Verify the dimensions of the subset
+dim(subset_data)
+
+# To check the distribution of records per country:
+table(subset_data$cntry_name)
+
+
+
+```
+
+```{r}
+table(imputed_data$cnt)
+```
+
+```{r}
+
+
+
+# I will be using Random Forest feature importance to obtain the first 25 (out of the 117 I have) variables to predict HDI:
+
+subset_data <- subset_data[, !names(subset_data) %in% "cntry_name"] #take off country name
+subset_data1 <- subset_data[, !names(subset_data) %in% "age"] #take off
+
+
+scaled_df <- scale(subset_data1)
+
+scaled_df <- as.data.frame(scaled_df)
+
+
+set.seed(1234)
+
+rf1 = randomForest(HDI ~ ., data=scaled_df, na.action = na.roughfix,
+                               proximity = T,
+                               ntree=500, mtry=4, importance=TRUE)
+
+t = importance(rf1)
+t1 = sort(t[,1], decreasing = T)
+t2 = t1[1:15] #20 predictor in decreasing order
+importance_vars = names(t2) #IN T2 THERE ARE NAMED VECTORS, TO ACCESS NAMES WE DO THIS
+print(importance_vars) #CHECK CORRECT NAMES
+
+# List of variables to keep 
+my_vars <- c("js_abr", "js_hom", "dut_ill", "imp_rlg", "el_fair", "js_div", "js_euth", "ps_arm", "el_brb", "el_thr", "HDI")
+
+
+
+my_sub <- subset_data[, my_vars]
+# Create a new data frame with only the selected variables
+# scaled_df <- scaled_df[, variables_to_keep]
+
+
+
+
+my_sub <- as.data.frame(my_sub)
+```
+
+# Splitting
+
+cambia nomi dataset!!!
+
+```{r}
+in_train <- createDataPartition(my_sub$HDI, p = 0.75, list = FALSE)  # 75% for training
+training <- my_sub[ in_train,]
+testing <- my_sub[-in_train,]
+nrow(training)
+nrow(testing)
+```
+
+```{r}
+training %>% ggplot(aes(x=HDI)) + geom_density(fill="navyblue") #+ scale_x_log10()
+```
+
+```{r}
+
+training %>% ggplot(aes(x=js_hom, y=HDI)) + geom_point(color = "navyblue")
+```
+
+```{r}
+
+library(ggplot2)
+library(GGally)
+
+ggcorr(training, label = TRUE)
+```
+
+# Regression
+
+```{r}
+
+linFit <- lm(HDI ~ js_abr, data=training)
+summary(linFit)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(linFit, pch=23 ,bg='orange',cex=2) 
+```
+
+```{r}
+pr.simple = exp(predict(linFit, newdata=testing))
+cor(testing$HDI, pr.simple)^2
+```
+
+The squared correlation is= 0.24 which is not high
+
+```{r}
+# Assuming 'training' is your dataset
+linFit <- lm(HDI ~ js_hom + age + dut_ill + js_abr + js_div + imp_rlg + js_euth + ps_arm + el_fair + el_brb + ps_lead + job_men + trs_ntn + dmc_coup + c_chr + el_thr + dmc_obey + dut_chl + hom_prn + dmc_cnt + dmc_rlg + trs_knw + c_gvr + c_plc + c_prt, data = training)
+
+summary(linFit)
+
+```
+
+R squared with all vars is = 0.54
+
+```{r}
+pr.multiple = exp(predict(linFit, newdata=testing))
+cor(testing$HDI, pr.multiple)^2
+```
+
+Correlation with all vars is = 0.40 which is better than using only 1 variable
+
+```{r}
+library(olsrr)
+
+model <- HDI ~ js_abr + js_hom + dut_ill + imp_rlg + el_fair + js_div + js_euth + ps_arm + el_brb + el_thr
+
+
+
+
+
+linFit <- lm(model, data=training)
+
+ols_step_all_possible(linFit) # All possible subset regressions: the number is exponential with p 
+
+ols_step_best_subset(linFit) # The best subset regression for each p: still exponential with p 
+
+
+#we re trying every subset of features to get the best model! 
+```
+
+good tradeoff between model simplicity and r squared:\
+
+```         
+8         js_abr js_hom dut_ill imp_rlg el_fair js_div ps_arm el_thr 
+```
