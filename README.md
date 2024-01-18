@@ -16,6 +16,7 @@ The project involves exploring and analyzing a dataset using various machine lea
 
 ## **Background**
 
+This was the second homework for a Statistical Learning course at UC3M.
 The motivation behind this project is to uncover the complex relationships between questionnaire responses and HDI. By predicting HDI, the project seeks to identify key socioeconomic indicators that significantly impact human development.
 
 ## **Data**
