@@ -1,0 +1,1157 @@
+---
+title: "HW2_Filippo_Nardi"
+author: "Filippo Nardi"
+date: "2023-12-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This work is highly correlated to my first homework in this course. I will once again use the World Value survey to asses the different social and life values based on the HDI index provided by the United Nations.
+
+What I want to asses in this homework is if there is a correlation between some social tendencies (recorded by the World Value Survey through a questionnaire) and a low HDI index, for example is a negative consideration of democracy a predictor for a low HDI index?
+
+First let's import all the Libraries needed for this project
+
+# Libraries
+
+```{r}
+library(randomForest)
+library(shapper)
+library(GGally)
+library(ggplot2)
+library(mice)
+library(VIM)
+library(caret)
+library(tidyr) 
+library(factoextra)
+library(cluster)
+library(mclust)
+library(kernlab)
+library(mice)
+
+```
+
+Here I will load the data, W7R (Wave 7 Reduced) is an already filtered version of the EVS_WVS_joint2, I will use this is as it's focused on readability (columns renamed) and social attitudes.
+
+Data2 in non other than the dataset containing the Human Development Index (HDI) produced by the United Nations Development Programme, it has other columns that are not HDI but for this analysis it is the thing I value the most
+
+```{r}
+data = load("W7R.rds")
+data2 =  read.csv("human-development-index-hdi-2014.csv", header = TRUE, stringsAsFactors = FALSE, fileEncoding = "UTF-8")
+
+
+
+```
+
+# Data Cleaning
+
+Since both datasets have differents standard for the names of the countries this list is for unifying that.
+
+```{r}
+
+rename_mapping <- c(
+  "Bolivia (Plurinational State of)" = "Bolivia",
+  "Bosnia and Herzegovina" = "Bosnia",
+  "Czech Republic" = "Czechia",
+  "Hong Kong, China (SAR)" = "HongKong-SAR",
+  "Iran (Islamic Republic of)" = "Iran",
+  "Korea (Republic of)" = "South-Korea",
+  "New Zealand" = "New-Zealand",
+  "Russian Federation" = "Russia",
+  "Viet Nam" = "Vietnam",
+  "The former Yugoslav Republic of Macedonia" = "North-Macedonia",
+  "United Kingdom" = "Great-Britain",
+  "United States" = "United-States"
+)
+
+data2$Location <- ifelse(data2$Location %in% names(rename_mapping), rename_mapping[data2$Location], data2$Location)
+
+
+```
+
+This is part is for creating the column in HDI in W7R and then appending the correct HDI value from the United Nations dataset
+
+```{r}
+W7R$HDI <- NA
+
+for (i in 1:nrow(W7R)) {
+  country <- W7R$cntry_name[i]
+  
+  match_rows <- which(data2$Location == country)
+  
+  if (length(match_rows) > 0) {
+    W7R$HDI[i] <- data2$Human.Development.Index..HDI.[match_rows[1]]
+  }
+}
+
+
+print(unique(W7R$HDI))
+```
+
+Here we will simply check and drop out from the analysis those countries that from W7R don't have their HDI listed.
+
+Those countries are the results of unique_countries_with_NA_HDI and are "Taiwan", "Ethiopia", "Macau" and "PuertoRico".
+
+```{r}
+rows_with_NA <- which(is.na(W7R$HDI))
+
+countries_with_NA_HDI <- W7R$cntry_name[rows_with_NA]
+
+unique_countries_with_NA_HDI <- unique(countries_with_NA_HDI)
+unique_countries_with_NA_HDI
+
+W7R <- W7R[!(W7R$cntry_name %in% unique_countries_with_NA_HDI), ]
+
+rownames(W7R) <- NULL
+
+```
+
+Let's have a preliminary summary of the Dataset.
+
+So since the 3 biggest indicators for HDI are: education, expected life and GNI per capita. Thus I have to drop some variables that would just be too highly correlated (and would not tell us much) with HDI, those are income level and education level and age (that will be dropped later on). I will also drop the column "E181_EVS5" that is what party the person has voted for. It would be great to do again a binary classification in populist and non populist like the last homework, but finding obscure parties in third world countries is a lot of work that I don't want to take as of right now, maybe in a future project.
+
+We can clearly see we have a lot NAs
+
+```{r}
+names(W7R)
+dim(W7R)
+str(W7R)
+summary(W7R)
+
+W7R <- W7R[, !(names(W7R) %in% c("incm_lvl", "edu_lvl", "E181_EVS5"))]
+
+na_count <- colSums(is.na(W7R))
+print(na_count)
+na_count2 <- sum(is.na(W7R$HDI))
+print(na_count2)
+
+```
+
+# Imputation
+
+Since we have lots of NAs we need to impute. I decided to impute all dataset to keep the particularity of all data, rather than doing the sampling before the imputation. This means that the imputing took about 6 hours.
+
+```{r}
+
+#md.pattern(W7R)
+
+
+
+#LET'S IMPUTE THE NAs
+# imputed_W7R <- mice(W7R, m = 5, maxit = 5, method = "pmm", seed = 123)
+# 
+# complete_W7R <- complete(imputed_W7R)
+# 
+# save(complete_W7R, file= "complete_W7R.rda")
+load("complete_W7R.rda")
+
+
+#remove dupes 
+
+imputed_data <- complete_W7R[!duplicated(complete_W7R), ]
+
+
+#let's make sure we have no NAs
+
+na_count <- colSums(is.na(imputed_data))
+print(na_count)
+```
+
+```{r}
+#just to check HDI and country it's still correct
+vars_to_save = c("HDI", "cntry_name")
+
+sub_to_check = imputed_data[,vars_to_save]
+
+
+```
+
+# Sampling of dataset
+
+Due to system limitation, it is not possible for me to use the whole dataset to compute a random forest as it will take 120gb of memory and I guess a long time to compute. I will have to use a samples.
+
+In the of the project i will use 20 random samples per country. This because after trying other numbers the computational times were enormous, especially for OLS_all_steps.
+
+```{r}
+#sample random records
+
+library(dplyr)
+
+sample_n_unique <- function(data, n) {
+  data %>%
+    group_by(cntry_name) %>%
+    slice_sample(n = 20, replace = FALSE)
+}
+
+#subset with n samples 
+subset_data <- imputed_data %>%
+  group_by(cntry_name) %>%
+  sample_n_unique(20)
+
+#to make sure:
+dim(subset_data)
+table(subset_data$cntry_name)
+
+
+
+```
+
+# Feature Selection
+
+Just as in the last exam I will make use of the feature importance of random forests to make Feature Selection to reduce form the 117 variables of the dataset.
+
+```{r}
+
+
+
+# I will be using Random Forest feature importance to obtain the first 25 (out of the 117 I have) variables to predict HDI:
+
+#have to drop cntry name because is a string and age becasue it's hihgly correlated with HDI
+subset_data <- subset_data[, !names(subset_data) %in% "cntry_name"] #take off country name
+subset_data1 <- subset_data[, !names(subset_data) %in% "age"] #take off
+
+#here i will scale to better compute the random forest
+scaled_df <- scale(subset_data1)
+
+scaled_df <- as.data.frame(scaled_df)
+
+
+set.seed(1234)
+
+rf1 = randomForest(HDI ~ ., data=scaled_df, na.action = na.roughfix,
+                               proximity = T,
+                               ntree=500, mtry=4, importance=TRUE)
+
+#the feautre importance
+t = importance(rf1)
+t1 = sort(t[,1], decreasing = T)
+t2 = t1[1:15] #15 predictor in decreasing order
+importance_vars = names(t2) #IN T2 THERE ARE NAMED VECTORS, TO ACCESS NAMES WE DO THIS
+print(importance_vars) #CHECK CORRECT NAMES
+
+# List of variables to keep 
+my_vars <- c("js_hom", "js_abr", "js_div", "imp_rlg", "js_euth", "dut_ill", "ps_arm", "dut_chl", "el_fair", "job_men", "el_thr", "trs_ntn", "ps_lead", "men_lead", "el_brb",  "HDI")
+
+my_sub <- subset_data[, my_vars]
+my_sub <- as.data.frame(my_sub)
+```
+
+## Recomputing variables
+
+As later on I saw a big correlation between these 3 variables I decided to make only 1 variable out of these 3. This actually makes a lot of sense as in common sociology this variables are "proxies" to asses if an individual is religious or not. Reasons why I am doing here rather than after is because doing so I don't have to do it 4 times.
+
+```{r}
+my_sub$rel = (my_sub$js_hom + my_sub$js_abr + my_sub$js_div + my_sub$js_euth)/4
+
+my_sub <- my_sub[, !(names(my_sub) %in% c("js_hom", "js_abr", "js_div", "js_euth"))]
+```
+
+# Splitting
+
+```{r}
+in_train <- createDataPartition(my_sub$HDI, p = 0.75, list = FALSE)  # 75% for training
+training <- my_sub[ in_train,]
+testing <- my_sub[-in_train,]
+nrow(training)
+nrow(testing)
+```
+
+# Creation of categorical Variable
+
+So here I will create a categorical variable called "cat". It's the variable HDI that I wanted to split into a binary variable. 761 is the HDI of Turkey, which is very close to being a middle point for splitting, but while keeping a bit more countries (10 circa) at the lower end of the scale
+
+```{r}
+
+# Assuming df is your dataframe and your_variable is the column name
+training_cat <- training %>% 
+  mutate(cat = ifelse(HDI >= 0.761, "high", "low"))
+testing_cat <- testing %>% 
+  mutate(cat = ifelse(HDI >= 0.761, "high", "low"))
+
+training_cat <- training_cat[, !names(training_cat) %in% "HDI"] #take off
+testing_cat <- testing_cat[, !names(testing_cat) %in% "HDI"] #take off
+
+training_cat$cat <- factor(training_cat$cat, levels = c("low", "high"))  
+testing_cat$cat <- factor(testing_cat$cat, levels = c("low", "high"))  
+
+levels(training_cat$cat)
+
+```
+
+# Visualization
+
+here we will do a bit of visualization to see how data is distributed and correlations
+
+```{r}
+library(ggplot2)
+library(GGally)
+ggcorr(training, label=TRUE)
+```
+
+```{r}
+heatmap(cor(training))
+```
+
+```{r}
+training %>% ggplot(aes(x=HDI)) + geom_density(fill="navyblue") 
+
+```
+
+```{r}
+training %>% ggplot(aes(x=rel, y=HDI)) + geom_point(color = "navyblue")
+```
+
+```{r}
+boxplot(training, las=2, col="darkblue")
+
+```
+
+```{r}
+#scale to see how HDI is disrtibuted
+boxplot(scale(training), las=2, col="darkblue")
+
+```
+
+```{r}
+hist(training$HDI, col="lightblue")
+```
+
+```{r}
+plot(training_cat$cat, col="lightblue")
+```
+
+# Creating test_results
+
+I will try some ways of regression and ML stuff so it's good to keep a log
+
+```{r}
+test_results <- data.frame(HDI = testing$HDI)
+test_results_cat <- data.frame(cat = testing_cat$cat)
+```
+
+# Regression
+
+Let's start with the regression
+
+```{r}
+
+linFit <- lm(HDI ~ rel, data=training)
+summary(linFit)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(linFit, pch=23 ,bg='orange',cex=2) 
+```
+
+```{r}
+pr.simple = predict(linFit, newdata=testing)
+cor(testing$HDI, pr.simple)^2
+```
+
+The squared correlation is equal 0.31 which is not great
+
+```{r}
+
+linFit <- lm(HDI ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + job_men + el_thr + trs_ntn + ps_lead + men_lead + el_brb + rel, data = training)
+summary(linFit)
+```
+
+adjusted R-squared it's 0.48 which is greater than only using rel as predictor
+
+```{r}
+pr.multiple = predict(linFit, newdata=testing)
+cor(testing$HDI, pr.multiple)^2
+```
+
+Correlation with all vars is = 0.49 which is better than using only 1 variable
+
+```{r}
+library(olsrr)
+
+names(my_sub)
+
+model <- HDI ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + job_men + el_thr + trs_ntn + ps_lead + men_lead + el_brb + rel
+
+linFit <- lm(model, data=training)
+
+ols_step_all_possible(linFit) # All possible subset regressions: the number is exponential with p 
+
+ols_step_best_subset(linFit) # The best subset regression for each p: still exponential with p 
+
+
+#we re trying every subset of features to get the best model! 
+```
+
+so here a reasonable approach would be to use the variables : imp_rlg dut_ill ps_arm dut_chl el_fair trs_ntn men_lead rel it explains 0.50.
+
+```{r}
+linFit <- lm(HDI ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + trs_ntn + men_lead + rel, data=training)
+summary(linFit)
+
+```
+
+Adjusted R-squared is equal to 0.486 which is the best one so far
+
+```{r}
+predictions <- predict(linFit, newdata=testing)
+cor(testing$HDI, predictions)^2
+RMSE <- sqrt(mean((predictions - testing$HDI)^2))
+RMSE #ROOT MEAN SQUARED
+```
+
+Using testing data we can see that the squared correlation is equal to 0.484 while the RMSE is equal to 0.0754.
+
+### Defining control
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5, repeats = 1)
+
+```
+
+all models from OLS step are:
+
+1 rel
+
+2 dut_chl rel
+
+3 imp_rlg dut_chl rel
+
+4 imp_rlg dut_chl trs_ntn rel
+
+5 imp_rlg ps_arm dut_chl trs_ntn rel
+
+6 imp_rlg ps_arm dut_chl el_fair trs_ntn rel
+
+7 imp_rlg dut_ill ps_arm dut_chl el_fair trs_ntn rel
+
+8 imp_rlg dut_ill ps_arm dut_chl el_fair trs_ntn men_lead rel
+
+9 imp_rlg dut_ill ps_arm dut_chl el_fair trs_ntn men_lead el_brb rel
+
+10 imp_rlg dut_ill ps_arm dut_chl el_fair trs_ntn ps_lead men_lead el_brb rel
+
+11 imp_rlg dut_ill ps_arm dut_chl el_fair el_thr trs_ntn ps_lead men_lead el_brb rel
+
+12 imp_rlg dut_ill ps_arm dut_chl el_fair job_men el_thr trs_ntn ps_lead men_lead el_brb rel
+
+### Defining 12 models to see which one would perform best:
+
+```{r}
+model1 <- HDI ~ rel
+model2 <- HDI ~ dut_chl + rel
+model3 <- HDI ~ imp_rlg + dut_chl + rel
+model4 <- HDI ~ imp_rlg + dut_chl + trs_ntn + rel
+model5 <- HDI ~ imp_rlg + ps_arm + dut_chl + trs_ntn + rel
+model6 <- HDI ~ imp_rlg + ps_arm + dut_chl + el_fair + trs_ntn + rel
+model7 <- HDI ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + trs_ntn + rel
+model8 <- HDI ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + trs_ntn + men_lead + rel
+model9 <- HDI ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + trs_ntn + men_lead + el_brb + rel
+model10 <- HDI ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + trs_ntn + ps_lead + men_lead + el_brb + rel
+model11 <- HDI ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + el_thr + trs_ntn + ps_lead + men_lead + el_brb + rel
+model12 <- HDI ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + job_men + el_thr + trs_ntn + ps_lead + men_lead + el_brb + rel
+```
+
+### Defining 12 categorical models to see which one would perform best:
+
+```{r}
+
+model1_c <- cat ~ rel
+model2_c <- cat ~ dut_chl + rel
+model3_c <- cat ~ imp_rlg + dut_chl + rel
+model4_c <- cat ~ imp_rlg + dut_chl + trs_ntn + rel
+model5_c <- cat ~ imp_rlg + ps_arm + dut_chl + trs_ntn + rel
+model6_c <- cat ~ imp_rlg + ps_arm + dut_chl + el_fair + trs_ntn + rel
+model7_c <- cat ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + trs_ntn + rel
+model8_c <- cat ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + trs_ntn + men_lead + rel
+model9_c <- cat ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + trs_ntn + men_lead + el_brb + rel
+model10_c <- cat ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + trs_ntn + ps_lead + men_lead + el_brb + rel
+model11_c <- cat ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + el_thr + trs_ntn + ps_lead + men_lead + el_brb + rel
+model12_c <- cat ~ imp_rlg + dut_ill + ps_arm + dut_chl + el_fair + job_men + el_thr + trs_ntn + ps_lead + men_lead + el_brb + rel
+```
+
+Let's start with an attempt from a model from the lower end of variables used.
+
+```{r}
+lm_tune <- train(model5, data = training, 
+                 method = "lm", 
+                 preProc=c('scale', 'center'),
+                 trControl = ctrl)
+lm_tune
+```
+
+predicting the model
+
+```{r}
+test_results$lm <- predict(lm_tune, testing)
+postResample(pred = test_results$lm,  obs = test_results$HDI)
+
+```
+
+#### Trying 12 models LM
+
+I will basically perform what is done by the olsrr package but doing this ensure the results are corrected and also defining the 12 models will be used again later on.
+
+```{r}
+library(caret)
+
+
+
+# Create a function to iterate through models and evaluate performance
+evaluate_models <- function(models, training_data, testing_data) {
+  results <- data.frame(Model = character(), RMSE = numeric(), R_squared = numeric(), stringsAsFactors = FALSE)
+  
+  for (i in 1:length(models)) {
+    model_name <- paste0("model", i)
+    model_formula <- as.formula(models[[i]])
+    
+    # Train the model
+    lm_tune <- train(model_formula, data = training_data, 
+                     method = "lm", 
+                     preProc = c('scale', 'center'),
+                     trControl = trainControl(method = "none"))
+    
+    # Make predictions on testing data
+    test_results <- testing_data
+    test_results[[model_name]] <- predict(lm_tune, newdata = testing_data)
+    
+    # Calculate RMSE and R-squared
+    rmse <- sqrt(mean((test_results$HDI - test_results[[model_name]])^2))
+    rsquared <- cor(test_results$HDI, test_results[[model_name]])^2
+    
+    # Store results in a data frame
+    results[i, ] <- list(model_name, rmse, rsquared)
+  }
+  
+  return(results)
+}
+
+# Usage of the function with your data
+results <- evaluate_models(list(model1, model2, model3, model4, model5, model6, model7, model8, model9, model10, model11, model12), training, testing)
+
+# Print the results
+print(results)
+
+
+```
+
+It seems that the best in my test the model which perform best is the model 12 with 12 variables. It achieves a RMSE of 0.08144404 and a R-squared 0.4622049
+
+So this means that error is very low, but the only about 46.22% of the variance in the dependent variable is explained by my model. WHY?
+
+I narrowed it down to 3 reasons:
+
+1.  Complexity of the Data: The dataset is probably noisy or complex being a questionnaire
+2.  The model may be overfitting
+3.  While doing the Random Forest for feature selection we missed some Important Features.
+
+Unfortunately this will be repated in the conclusion because this won't change for the model.
+
+#### Trying 12 models with the categorical target in logistic
+
+```{r}
+library(caret)
+library(pROC)
+
+
+
+# Create a function to iterate through models and evaluate performance
+evaluate_models_classification <- function(models, training_data, testing_data) {
+  results <- data.frame(Model = character(), Accuracy = numeric(), AUC = numeric(), stringsAsFactors = FALSE)
+  
+  for (i in 1:length(models)) {
+    model_name <- paste0("model", i)
+    model_formula <- as.formula(models[[i]])
+    
+    # Train the model - using logistic regression (glm) for classification
+    glm_tune <- train(
+      model_formula, 
+      data = training_data, 
+      method = "glm", 
+      family = "binomial",
+      trControl = trainControl(method = "none")
+    )
+    
+    # Make predictions on testing data
+    test_results <- testing_data
+    test_results[[model_name]] <- predict(glm_tune, newdata = testing_data, type = "raw")
+    #test_results[[model_name]] <- factor(test_results[[model_name]], levels = c("low", "high"))
+    
+    # Calculate accuracy and AUC for classification
+    accuracy <- confusionMatrix(test_results[[model_name]], testing_data$cat)$overall['Accuracy']
+    auc <- roc(test_results[[model_name]], as.numeric(testing_data$cat))$auc
+    
+    # Store results in a data frame
+    results[i, ] <- list(model_name, accuracy, auc)
+  }
+  
+  return(results)
+}
+
+# Usage of the function with your data for classification
+results_classification <- evaluate_models_classification(list(model1_c, model2_c, model3_c, model4_c, model5_c, model6_c, model7_c, model8_c, model9_c, model10_c, model11_c, model12_c), training_cat, testing_cat)
+
+# Print the results
+print(results_classification)
+
+```
+
+For the categorical part we can see that in my opinion the best model is model10 because ti has an accuracy of 0.7440000 and a AUC of 0.7382353. So I'm, choosing this mostly based on the AUC as it represents the model's ability to distinguish between positive and negative classes and having already worked with binary variables it's very common to have a super great accuracy because the minority class is being treated mostly as a the majority class.
+
+For this model I reckon this are very good metrics.
+
+## Linear Regression
+
+```{r}
+lm_tune <- train(model12, data = training, 
+                 method = "lm", 
+                 preProc=c('scale', 'center'),
+                 trControl = ctrl)
+lm_tune
+
+```
+
+```{r}
+pr.simple = predict(lm_tune, newdata=testing)
+cor(testing$HDI, pr.simple)^2
+```
+
+```{r}
+qplot(test_results$lm, test_results$HDI) + 
+  labs(title="Linear Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(0.50, 1), y = c(0.50, 1)) +
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+```
+
+## Logistic Regression
+
+```{r}
+glm_tune <- train(
+      model10_c, 
+      data = training_cat, 
+      method = "glm", 
+      family = "binomial",
+      trControl = trainControl(method = "none")
+    )
+glm_tune
+```
+
+```{r}
+pr.simple <-predict(glm_tune, newdata = testing_cat, type = "raw")
+accuracy <- confusionMatrix(pr.simple, testing_cat$cat)$overall['Accuracy']
+auc <- roc(pr.simple, as.numeric(testing_cat$cat))$auc
+correlation_squared <- cor(as.numeric(testing_cat$cat), as.numeric(pr.simple))^2
+```
+
+```{r}
+print(accuracy)
+print(auc)
+print("correalation squared")
+print(correlation_squared)
+```
+
+We can see how using the logistic regression we get some nice results as the accuracy is 0.73 and AUC is 0.72.\
+The correlation squared is only 0.19
+
+So we can say that:
+
+1.  The model seems to have moderate predictive performance.
+
+2.  It shows some capability to distinguish between classes, as indicated by the AUC.
+
+3.  The squared correlation suggests some alignment between predicted probabilities and actual classes but not extremely strong correlation.
+
+## Overfitted
+
+```{r}
+
+alm_tune <- train(model12, data = training, 
+                  method = "lm", 
+                  preProc=c('scale', 'center'),
+                  trControl = ctrl)
+```
+
+```{r}
+test_results$alm <- predict(alm_tune, testing)
+postResample(pred = test_results$alm,  obs = test_results$HDI)
+```
+
+RMSE 0.081 R\^2 0.46
+
+```{r}
+qplot(test_results$alm, test_results$HDI) + 
+  labs(title="Linear Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(0.5, 1), y = c(0.5, 1)) +
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+```
+
+RMSE of 0.081 is encouraging but the Rsquared seems to keep being low. From the graph we can see that about half or 3/4 of the points are in the slope or in the immediate premises
+
+## Forward Regression
+
+```{r}
+for_tune <- train(model12, data = training, 
+                  method = "leapForward", 
+                  preProc=c('scale', 'center'),
+                  tuneGrid = expand.grid(nvmax = 4:12),
+                  trControl = ctrl)
+
+for_tune
+plot(for_tune)
+```
+
+We can see from the graph and from the values that for RMSE the best results are shown when using a high numbers of predictors, esepcially around 11 or 12.
+
+```{r}
+coef(for_tune$finalModel, for_tune$bestTune$nvmax)
+```
+
+```{r}
+test_results$frw <- predict(for_tune, testing)
+postResample(pred = test_results$frw,  obs = test_results$HDI)
+```
+
+RMSE 0.081 Rsquared 0.46
+
+```{r}
+qplot(test_results$frw, test_results$HDI) + 
+  labs(title="Forward Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(0.5, 1), y = c(0.5, 1)) +
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+```
+
+We can see that also this plot resembles a lot the other plot so a lot of points in the slope area, but some still way outside.
+
+## Backward
+
+```{r}
+back_tune <- train(model12, data = training, 
+                   method = "leapBackward", 
+                   preProc=c('scale', 'center'),
+                   tuneGrid = expand.grid(nvmax = 4:12),
+                   trControl = ctrl)
+back_tune
+plot(back_tune)
+```
+
+Again just like in the Forward regression it semes like the best numbebrs of predictors is still in the range of 10 to through 12
+
+```{r}
+coef(back_tune$finalModel, back_tune$bestTune$nvmax)
+```
+
+```{r}
+test_results$bw <- predict(back_tune, testing)
+postResample(pred = test_results$bw,  obs = test_results$HDI)
+```
+
+```{r}
+qplot(test_results$bw, test_results$HDI) + 
+  labs(title="Backward Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(0.5, 1), y = c(0.5, 1)) +
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+```
+
+## Stepwise
+
+```{r}
+step_tune <- train(model12, data = training, 
+                   method = "leapSeq", 
+                   preProc=c('scale', 'center'),
+                   tuneGrid = expand.grid(nvmax = 4:12),
+                   trControl = ctrl)
+plot(step_tune)
+```
+
+We can see that here is no different, 12 seems to still be the best number to minimize RMSE.
+
+```{r}
+# which variables are selected?
+coef(step_tune$finalModel, step_tune$bestTune$nvmax)
+```
+
+```{r}
+test_results$seq <- predict(step_tune, testing)
+postResample(pred = test_results$seq,  obs = test_results$HDI)
+```
+
+RMSE 0.080 Rsquared 0.46
+
+# Machine Learning models
+
+So in this section we will test a bit some basic alghoritms of machine learning. Here we will test both for continuos and categorical data the KNN,Random Forest and Gradient boosted.
+
+## KNN
+
+### KNN continuous data
+
+```{r}
+modelLookup('kknn')
+```
+
+```{r}
+knn_tune <- train(model12, 
+                  data = training,
+                  method = "kknn",   
+                  preProc=c('scale','center'),
+                  tuneGrid = data.frame(kmax=c(11,13,15,19,21),distance=2,kernel='optimal'),
+                  trControl = ctrl)
+plot(knn_tune)
+
+test_results$knn <- predict(knn_tune, testing)
+
+postResample(pred = test_results$knn,  obs = test_results$HDI)
+
+```
+
+RMSE 0.07773597 R-Squared 0.50091220. We can see that for the first time in this homework we achieve R-sqaured values of 0.5.
+
+The combination of a low RMSE, a moderate Rsquared, and a low MAE suggests that the KNN model with kmax set to 21 is performing reasonably well. It's providing reasonably accurate predictions while explaining a portion of the variability in the data. However, the Rsquared of 0.5 indicates that there still is unexplained variability.
+
+### KNN categorical data
+
+```{r}
+
+knn_tune <- train(model10_c, 
+                  data = training_cat,
+                  method = "kknn",   
+                  preProc = c('scale', 'center'),
+                  tuneGrid = data.frame(kmax = c(11, 13, 15, 19, 21), distance = 2, kernel = 'optimal'),
+                  trControl = ctrl)
+plot(knn_tune)
+
+test_results_cat$knn <- predict(knn_tune, testing_cat)
+
+postResample(pred = test_results_cat$knn, obs = test_results_cat$cat)
+```
+
+Interestingly we can see that here the #max neighbors is around 19 but after that 20 and 21 seems to be decreasing.
+
+Here we can see an accuracy of 0.77 so quite high accuracy, while the kappa of 0.513 indicates a reasonable agreement between predicted and actual values beyond chance.
+
+(If in doubt why specifically model10_c is because i tried what is going to come before doing this)
+
+## Random Forest
+
+Just like in the regression I am going to try all 12 models both for classification and regression
+
+#### Trying 12 models RF
+
+```{r}
+library(caret)
+
+evaluate_models_rf <- function(models, training_data, testing_data) {
+  results <- data.frame(Model = character(), RMSE = numeric(), R_squared = numeric(), stringsAsFactors = FALSE)
+  
+  for (i in 1:length(models)) {
+    model_name <- paste0("model", i)
+    model_formula <- as.formula(models[[i]])
+    
+    rf_tune <- train(model_formula, 
+                     data = training_data,
+                     method = "rf",
+                     preProc = c('scale', 'center'),
+                     trControl = trainControl(method = "none"),
+                     ntree = 100,
+                     importance = TRUE)
+    
+    # Make predictions on testing data
+    test_results <- testing_data
+    test_results[[model_name]] <- predict(rf_tune, newdata = testing_data)
+    
+    # Calculate RMSE and R-squared
+    rmse <- sqrt(mean((test_results$HDI - test_results[[model_name]])^2))
+    rsquared <- cor(test_results$HDI, test_results[[model_name]])^2
+    
+    # Store results in a data frame
+    results[i, ] <- list(model_name, rmse, rsquared)
+  }
+  
+  return(results)
+}
+
+# Usage of the function with your data
+results_rf <- evaluate_models_rf(list(model1, model2, model3, model4, model5, model6, model7, model8, model9, model10, model11, model12), training, testing)
+
+# Print the results
+print(results_rf)
+
+
+
+```
+
+And just like in the linear that the best values for RMSE and Rsquared are achieved by the model with more variables: especially by model11 and model12, the latter of the two does achieve for the first time a Rsquared of 0.51.
+
+#### RF 12 models categorical
+
+```{r}
+
+library(caret)
+
+evaluate_models_rf_classification <- function(models, training_data, testing_data) {
+  results <- data.frame(Model = character(), Accuracy = numeric(), AUC= numeric(), stringsAsFactors = FALSE)
+  
+  for (i in 1:length(models)) {
+    model_name <- paste0("model", i)
+    model_formula <- as.formula(models[[i]])
+    
+    rf_tune <- train(
+      model_formula, 
+      data = training_data,
+      method = "rf",
+      trControl = trainControl(method = "none"),
+      ntree = 100,
+      importance = TRUE
+    )
+    
+    # Make predictions on testing data
+    test_results <- testing_data
+    test_results[[model_name]] <- predict(rf_tune, newdata = testing_data)
+    
+    # Calculate accuracy and AUC for classification
+    confusion <- confusionMatrix(test_results[[model_name]], testing_data$cat)
+    accuracy <- confusion$overall['Accuracy']
+    
+    # Calculate accuracy and AUC for classification
+    accuracy <- confusionMatrix(test_results[[model_name]], testing_data$cat)$overall['Accuracy']
+    auc <- roc(test_results[[model_name]], as.numeric(testing_data$cat))$auc
+    
+    # Store results in a data frame
+    results[i, ] <- list(model_name, accuracy, auc)
+  }
+  
+  return(results)
+}
+
+# Usage of the function with your data for classification
+results_rf_classification <- evaluate_models_rf_classification(
+  list(model1_c, model2_c, model3_c, model4_c, model5_c, model6_c, model7_c, model8_c, model9_c, model10_c, model11_c, model12_c), 
+  training_cat, 
+  testing_cat
+)
+
+# Print the results
+print(results_rf_classification)
+
+
+
+```
+
+Instead in the categorical part we can see that the best model are also the one with more variables the highest AUC are achieved by model10_c and model12_c at 0.76. Since we are already trying with 12 models in the continius data i decided to try the model with 10 variables for the classification with categorical data
+
+## RF continuos data
+
+```{r}
+rf_tune <- train(model12, 
+                 data = training,
+                 method = "rf",
+                 preProc=c('scale','center'),
+                 trControl = ctrl,
+                 ntree = 100,
+                 tuneGrid = data.frame(mtry=c(1,3,5,7)),
+                 importance = TRUE)
+
+plot(rf_tune)
+
+test_results$rf <- predict(rf_tune, testing)
+
+postResample(pred = test_results$rf,  obs = test_results$HDI)
+```
+
+We can see that working with continuos data there is not much to do, we still achieve a RMSE at around 0.0.077 and Rsquared 0.506.
+
+```{r}
+plot(varImp(rf_tune, scale = F), scales = list(y = list(cex = .95)))
+```
+
+Interestingly here we can see the feature importance plot and we can see what are the most important variables for the random forest. At first place by far we can see the variable i created, "rel" (proxy for religion). I am going to skip over to the second one, and for the third we can see the variable that stand for "Votes are counted fairly". At third we have another variable about the importance of religion and 5th and th are again 2 variables having to do with elections: bribing and threaten.
+
+Interesting....
+
+## RF categorical data
+
+```{r}
+rf_tune <- train(model10_c, 
+                 data = training_cat,
+                 method = "rf",
+                 preProc=c('scale','center'),
+                 trControl = ctrl,
+                 ntree = 100,
+                 tuneGrid = data.frame(mtry=c(1,3,5,7)),
+                 importance = TRUE)
+
+plot(rf_tune)
+
+test_results_cat$rf <- predict(rf_tune, testing_cat)
+
+postResample(pred = test_results_cat$rf,  obs = test_results_cat$cat)
+
+```
+
+As saw before the Accuracy is 0.77 and Kappa is 0.5305804.
+
+```{r}
+plot(varImp(rf_tune, scale = F), scales = list(y = list(cex = .95)))
+```
+
+In the variable importance plot we can see a plot that mostly resembles what we saw before, but here we see that in third place we have ps_arm which stand for "Having the army rule the country".
+
+## Xgboosted
+
+#### XGB continuos data
+
+```{r}
+xgb_tune <- train(model12, 
+                  data = training,
+                  method = "xgbTree",
+                  preProc=c('scale','center'),
+                  objective="reg:squarederror",
+                  trControl = ctrl,
+                  tuneGrid = expand.grid(nrounds = c(500,1000), max_depth = c(5,6,7), eta = c(0.01, 0.1, 1),
+                                         gamma = c(1, 2, 3), colsample_bytree = c(1, 2),
+                                         min_child_weight = c(1), subsample = c(0.2,0.5,0.8)))
+
+test_results$xgb <- predict(xgb_tune, testing)
+
+postResample(pred = test_results$xgb,  obs = test_results$HDI)
+```
+
+RMSE 0.092 Rsquared 0.29
+
+We can see that Xgboosted offers basically the worst performance of the models tried so far.
+
+#### XGB categorical data
+
+```{r}
+xgb_tune <- train(model10_c, 
+                  data = training_cat,
+                  method = "xgbTree",
+                  preProc=c('scale','center'),
+                  objective="reg:squarederror",
+                  trControl = ctrl,
+                  tuneGrid = expand.grid(nrounds = c(500,1000), max_depth = c(5,6,7), eta = c(0.01, 0.1, 1),
+                                         gamma = c(1, 2, 3), colsample_bytree = c(1, 2),
+                                         min_child_weight = c(1), subsample = c(0.2,0.5,0.8)))
+
+test_results_cat$xgb <- predict(xgb_tune, testing_cat)
+
+postResample(pred = test_results_cat$xgb,  obs = test_results_cat$cat)
+```
+
+```{r}
+plot(xgb_tune)
+```
+
+Accuracy 0.7813333 Kappa 0.5455620
+
+Well it seems that with categoricl data we get way better results as we get out best kappa so far
+
+# Ensemble for categorical data
+
+```{r}
+apply(test_results[-1], 2, function(x) mean(abs(x - test_results$HDI)))
+```
+
+```{r}
+test_results$comb = (test_results$alm + test_results$knn + test_results$rf)/3
+
+postResample(pred = test_results$comb,  obs = test_results$HDI)
+```
+
+We see that even using the ensemble with overfitted, knn and random forest we seem to still get results similar to the others models. a 0.076 RMSE and a 0.51 Rsquared.
+
+# Final Pred
+
+```{r}
+yhat = test_results$comb
+
+head(yhat)
+
+hist(yhat, col="lightblue")
+```
+
+as expected most of predictions are between 0.7 and 0.8. The rpoblem is that while we predict some values in the upper part, we don't hardly predict anything under 0.65 and too much over 0.9.
+
+## Prediction intervals
+
+```{r}
+y = test_results$HDI
+error = y-yhat
+hist(error, col="lightblue")
+```
+
+```{r}
+noise = error[1:100]
+```
+
+```{r}
+lwr = yhat[101:length(yhat)] + quantile(noise,0.05, na.rm=T)
+upr = yhat[101:length(yhat)] + quantile(noise,0.95, na.rm=T)
+```
+
+```{r}
+predictions = data.frame(real=y[101:length(y)], fit=yhat[101:length(yhat)], lwr=lwr, upr=upr)
+
+predictions = predictions %>% mutate(out=factor(if_else(real<lwr | real>upr,1,0)))
+
+# how many real observations are out of the intervals?
+mean(predictions$out==1)
+```
+
+```{r}
+ggplot(predictions, aes(x=fit, y=real))+
+  geom_point(aes(color=out)) + theme(legend.position="none") +
+  xlim(0.5, 1) + ylim(0.5, 1)+
+  geom_ribbon(data=predictions,aes(ymin=lwr,ymax=upr),alpha=0.3) +
+  labs(title = "Prediction intervals", x = "prediction",y="real HDI")
+```
+
+We can see that as the rest of the work we are able to capture most of the data, but my prediction don't capture the points under 0.65 and I predict too many over 0.875.
+
+# Conclusion
+
+So when starting this project I definitely did not take in consideration some things.
+
+#### Limitations:
+
+So when using the full model I did not thought about the computational power needed to do some of the stuff required. For example just the imputation needed to run for nearly six hours. So i quickly realized that a sample was needed, first try was to use 150 records and 26 variables but the OLS_step was not able to finish even after 2 days of straight running on my pc. After that i tried with 150 records and 20 variables but the same happened. After other attempts I landed on 20 records per country and 15 variables from feature selection.
+
+#### Considerations:
+
+Continuos data:
+
+I also thought I would get a lot better results, but the Rsquared has always ranged from 0.46 to less than 0.51 In the continuous data. At least the RMSE was fairly low averaging betwen 0.07 to 0.08
+
+In the end in the ensemble I used the overfitted model, the KNN and the Random Forest and i obtained a Rsquared of 0.49 and RMSE of 0.08.
+
+By the final graphs we can see that most of the predictions made but the model are between 0.7 and 0.8. So where the model is struggling is outside that range, especially under the 0.6 of HDI. If we look on the other half, so closer to the limit of 1 we can see that on the opposite the model is more predicting higher values that are non existing as for the real values are more common lower rather that higher values. This I don't believe to be a bias based on the sample as we are taking 20 entries per country so all in all it should be balanced.
+
+Categorical Data:
+
+As for categorical data we can say similar things in the sense that the accuracy has ranged around 0.78 for all models.
+
+At least we can say that an accuracy of nearly 0.8 is very good for using real world data.
+
+#### Another view:
+
+Getting back to what we saw in the variable importance of the random forest.
+
+For the continuos data we saw that the most important variable in feature importance is rel, the one i coded. The second is dut_ill that in the codebook is coded as : "Duty towards society to have children". The third one as mentioned is towards fairness of elections. The fourth one is imp_rlg that is "Important in life: Religion". Fifth one is ps_arm that as said before is the question about "Having the army rule the country". Fifth and sixth are again two variables regarding the elections: "Voters are bribed" and "Voters are threatened with violence at the polls".
+
+For categorical data we have the same 6 out of the first 7 variables in feature importance. The new one we see here is: men_lead that in is the questions about : "On the whole, men make better political leaders than women do"
+
+So with this considerations what can we say?
+
+We can say that the biggest predictors to classify a high or low HDI based on a questionnaire is if a society has strong tendencies (high or low) towards: religion, birth rate, strong influence of the army in the political sphere, fairness (in various degree) of the elections.
+
+We can see that if for example we take a society: very religious, high birth rate, where the army highly influence the poiltics, with not fair elections we get (mostly) a third world country where it is expected to have a low HDI.
